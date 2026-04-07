@@ -25,10 +25,12 @@ MNIST, UCI_Adult, UCI_Letter and UCI_Yeast datasets are available. For datasets 
  ```
 
  In the case of training the sNDF on MNIST with alternating optimization, the command is like
- 
+
+ Plain training:
  ```
  python train.py -dataset mnist -n_class 10 -gpuid 0 -n_tree 80 -tree_depth 10 -batch_size 1000 -epochs 100
  ```
+ Architecture and hyper-parameters tuning:
  ```
  python tune.py -dataset mnist -n_trials 50 -epochs 30 -es_monitor val_loss -gpuid 0
  ```
