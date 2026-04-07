@@ -16,6 +16,7 @@ MNIST, UCI_Adult, UCI_Letter and UCI_Yeast datasets are available. For datasets 
 - PyTorch >= 1.0.0
 - numpy
 - sklearn
+- optuna
 
 
 # Usage
@@ -23,24 +24,11 @@ MNIST, UCI_Adult, UCI_Letter and UCI_Yeast datasets are available. For datasets 
  python train.py --ARG=VALUE
  ```
 
- in the case of training the sNDF on MNIST with alternating optimization, the command is like
+ In the case of training the sNDF on MNIST with alternating optimization, the command is like
  
  ```
  python train.py -dataset mnist -n_class 10 -gpuid 0 -n_tree 80 -tree_depth 10 -batch_size 1000 -epochs 100
  ```
-
-# Results
-
-Not spending much time on picking hyperparameters and without bells and whistles, I got the accuracy results(obtained by training $\pi$ and $\Theta$ seperately) as follows:
-
-| Dataset | sNDF | dNDF | 
-| - | :-: | -: | 
-| MNIST | 0.9794| 0.9963 | 
-| UCI_Adult | 0.8558 | NA | 
-| UCI_Letter | 0.9507 | NA |
-| UCI_Yeast | 0.6031 | NA |
-
-By adding the nonlinearity in the routing function, the accuraries can reach 0.6502 and 0.9753 respectively on the UCI_Yeast and UCI_Letter.
-
-# Note
-Some people may experience the 'loss is NaN' situation which could be caused by the output probability being zero. Please make sure you have normalized your data and used a large enough tree size and depth. In the case that you want to stick with your tree setting, a workaround could be to clamp the output value. 
+ ```
+ python tune.py -dataset mnist -n_trials 50 -epochs 30 -es_monitor val_loss -gpuid 0
+ ```
