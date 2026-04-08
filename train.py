@@ -98,6 +98,8 @@ def prepare_model(opt):
     model = model.to(opt.device)
  
     print(model)
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print('Trainable parameters: %d' % trainable_params)
     return model
  
  

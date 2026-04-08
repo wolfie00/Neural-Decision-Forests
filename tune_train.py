@@ -8,10 +8,10 @@ Data splits
   test   → touched exactly once, after the final retrained model is ready
 
 Run (monitor validation loss):
-    python tune.py -dataset mnist -n_trials 50 -epochs 30 -es_monitor val_loss -gpuid 0
+    python tune_train.py -dataset mnist -n_trials 50 -epochs 30 -es_monitor val_loss -gpuid 0
 
 Run (monitor validation accuracy):
-    python tune.py -dataset mnist -n_trials 50 -epochs 30 -es_monitor val_acc -gpuid 0
+    python tune_train.py -dataset mnist -n_trials 50 -epochs 30 -es_monitor val_acc -gpuid 0
 """
 
 import argparse
@@ -104,6 +104,8 @@ class EarlyStopping:
         self.counter      = 0
         self.should_stop  = False
 
+        self._ckpt_saved = False
+
     def _is_improvement(self, new_value: float) -> bool:
         if self.mode == 'min':
             return new_value < self.best_value - self.min_delta
@@ -119,6 +121,7 @@ class EarlyStopping:
             self.best_value   = metric_value
             # self.best_weights = copy.deepcopy(model.state_dict())
             torch.save(model.state_dict(), self._ckpt_path)  # save to disk
+            self._ckpt_saved = True
             self.counter      = 0
         else:
             self.counter += 1
@@ -129,6 +132,9 @@ class EarlyStopping:
         """Load the weights from the best epoch back into the model."""
         if self.best_weights is not None:
             model.load_state_dict(self.best_weights)
+        if not self._ckpt_saved:
+            logging.warning("EarlyStopping.restore_best() called but no checkpoint was saved.")
+            return
         device = next(model.parameters()).device
         model.load_state_dict(
             torch.load(self._ckpt_path, map_location=device, weights_only=True)
@@ -192,50 +198,103 @@ def prepare_db(opt) -> dict:
 # ---------------------------------------------------------------------------
 # Search space
 # ---------------------------------------------------------------------------
-
-def sample_hyperparameters(trial: optuna.Trial) -> dict:
-    """All tuneable knobs in one place — add / remove freely."""
-    return {
-        # Forest architecture
+ 
+def sample_hyperparameters(trial: optuna.Trial, dataset_name: str) -> dict:
+    """
+    All tuneable knobs in one place — add / remove freely.
+ 
+    The feature-layer parameters are dataset-conditional: Optuna natively
+    supports this — parameters that are never suggested in a trial simply
+    do not appear in trial.params, so the study handles mixed spaces cleanly.
+ 
+    *** Memory warning — keep tree_depth ≤ 10 for 32 GB machines ***
+    n_leaf = 2^tree_depth. With deep MNIST features (~1152 dims) and
+    tree_depth=10 the decision layer is already ~4.7M params per tree.
+    """
+    hp = {
+        # --- Forest architecture ---
         'n_tree':            trial.suggest_int  ('n_tree',            2,   80),
-        'tree_depth':        trial.suggest_int  ('tree_depth',        2,    10),
+        'tree_depth':        trial.suggest_int  ('tree_depth',        2,   10),
         'tree_feature_rate': trial.suggest_float('tree_feature_rate', 0.1,  1.0),
         'jointly_training':  trial.suggest_categorical('jointly_training', [True, False]),
-
-        # Feature extractor
-        'feat_dropout':      trial.suggest_float('feat_dropout',      0.0,  0.5),
-        # 'shallow':           trial.suggest_categorical('shallow', [True, False]),
-
-        # Optimiser
-        'lr':                trial.suggest_float('lr',           1e-4, 1e-1, log=True),
-        'weight_decay':      trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True),
-        # 'batch_size':        trial.suggest_categorical('batch_size', [64, 128, 256]),
+ 
+        # --- Optimiser ---
+        'lr':           trial.suggest_float('lr',           1e-4, 1e-1, log=True),
+        'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True),
     }
-
-
+ 
+    # --- Feature layer (dataset-specific) ---
+    if dataset_name == 'mnist':
+        #   n_conv_blocks : depth of the CNN (1 = shallow, 3–4 = deep)
+        #   base_channels : width of the first conv block; doubles each block
+        #   kernel_size   : spatial extent of each filter (odd values only)
+        #   dropout_rate  : applied after every pooling step (Dropout2d)
+        hp['n_conv_blocks'] = trial.suggest_int('n_conv_blocks', 1, 4)
+        hp['base_channels'] = trial.suggest_categorical('base_channels', [16, 32, 64])
+        hp['kernel_size']   = trial.suggest_categorical('kernel_size',   [3, 5])
+        hp['dropout_rate']  = trial.suggest_float('dropout_rate',  0.0, 0.5)
+        hp['batch_norm']    = trial.suggest_categorical('batch_norm',    [True, False])
+    else:
+        # UCI tabular datasets all share the same MLP architecture search space
+        #   n_layers    : number of Linear→BN→ReLU→Dropout blocks
+        #   hidden_size : width of every hidden layer (constant across blocks)
+        #   dropout_rate: applied after every block
+        hp['n_layers']      = trial.suggest_int('n_layers',    1,  3)
+        hp['hidden_size']   = trial.suggest_categorical('hidden_size', [256, 512, 1024, 2048])
+        hp['dropout_rate']  = trial.suggest_float('dropout_rate', 0.0, 0.5)
+        hp['batch_norm']    = trial.suggest_categorical('batch_norm',    [True, False])
+    return hp
+ 
+ 
 # ---------------------------------------------------------------------------
 # Model builder
 # ---------------------------------------------------------------------------
-
+ 
 def build_model(hp: dict, dataset_name: str, n_class: int, device: torch.device) -> torch.nn.Module:
-    # shallow = hp['shallow'] if dataset_name == 'mnist' else True
-    shallow = False if dataset_name == 'mnist' else True
-
-    feat_layer_cls = {
-        'mnist':  ndf.MNISTFeatureLayer,
-        'adult':  ndf.UCIAdultFeatureLayer,
-        'letter': ndf.UCILetterFeatureLayer,
-        'yeast':  ndf.UCIYeastFeatureLayer,
-    }[dataset_name]
-
-    feat_layer = feat_layer_cls(hp['feat_dropout'], shallow=shallow)
+    """
+    Instantiate a NeuralDecisionForest from a hyperparameter dict produced
+    by sample_hyperparameters().  All feature-layer knobs are forwarded to
+    the appropriate layer class.
+    """
+    if dataset_name == 'mnist':
+        feat_layer = ndf.MNISTFeatureLayer(
+            dropout_rate   = hp['dropout_rate'],
+            n_conv_blocks  = hp['n_conv_blocks'],
+            base_channels  = hp['base_channels'],
+            kernel_size    = hp['kernel_size'],
+            batch_norm     = hp['batch_norm'],
+        )
+    elif dataset_name == 'adult':
+        feat_layer = ndf.UCIAdultFeatureLayer(
+            dropout_rate = hp['dropout_rate'],
+            n_layers     = hp['n_layers'],
+            hidden_size  = hp['hidden_size'],
+            batch_norm   = hp['batch_norm'],
+        )
+    elif dataset_name == 'letter':
+        feat_layer = ndf.UCILetterFeatureLayer(
+            dropout_rate = hp['dropout_rate'],
+            n_layers     = hp['n_layers'],
+            hidden_size  = hp['hidden_size'],
+            batch_norm   = hp['batch_norm'],
+        )
+    elif dataset_name == 'yeast':
+        feat_layer = ndf.UCIYeastFeatureLayer(
+            dropout_rate = hp['dropout_rate'],
+            n_layers     = hp['n_layers'],
+            hidden_size  = hp['hidden_size'],
+            batch_norm   = hp['batch_norm'],
+        )
+    else:
+        raise NotImplementedError(f"Unknown dataset: {dataset_name}")
+ 
     forest = ndf.Forest(
-        n_tree=hp['n_tree'],
-        tree_depth=hp['tree_depth'],
-        n_in_feature=feat_layer.get_out_feature_size(),
-        tree_feature_rate=hp['tree_feature_rate'],
-        n_class=n_class,
-        jointly_training=hp['jointly_training'],
+        n_tree           = hp['n_tree'],
+        tree_depth       = hp['tree_depth'],
+        n_in_feature     = feat_layer.get_out_feature_size(),
+        tree_feature_rate= hp['tree_feature_rate'],
+        n_class          = n_class,
+        jointly_training = hp['jointly_training'],
     )
     return ndf.NeuralDecisionForest(feat_layer, forest).to(device)
 
@@ -265,7 +324,7 @@ def train_one_epoch(model, loader, optim, device, jointly_training) -> None:
                 feat_batches.append(feats)
                 target_batches.append(cls_onehot[target])
 
-            for tree in tqdm(model.forest.trees, desc='Updating...'):
+            for tree in tqdm(model.forest.trees, desc='Updating pi...'):
                 mu_batches = []
                 for feats in feat_batches:
                     mu = tree(feats)  # [batch_size, n_leaf]
@@ -346,7 +405,7 @@ def run_trial(trial: optuna.Trial, db: dict, opt, device: torch.device) -> float
     Returns best val_acc (Optuna objective), taken at the best-ES-checkpoint
     epoch rather than the final epoch.
     """
-    hp    = sample_hyperparameters(trial)
+    hp    = sample_hyperparameters(trial, opt.dataset)
     model = build_model(hp, opt.dataset, opt.n_class, device)
     optim = torch.optim.Adam(
         [p for p in model.parameters() if p.requires_grad],

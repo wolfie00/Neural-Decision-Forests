@@ -7,70 +7,154 @@ from typing import cast
 import torch.nn.functional as F
  
  
-class MNISTFeatureLayer(nn.Sequential):
-    def __init__(self, dropout_rate, shallow=False):
-        super(MNISTFeatureLayer, self).__init__()
-        self.shallow = shallow
-        if shallow:
-            self.add_module('conv1', nn.Conv2d(1, 64, kernel_size=15, padding=1, stride=5))
-        else:
-            self.add_module('conv1', nn.Conv2d(1, 32, kernel_size=3, padding=1))
-            self.add_module('relu1', nn.ReLU())
-            self.add_module('pool1', nn.MaxPool2d(kernel_size=2))
-            self.add_module('drop1', nn.Dropout(dropout_rate))
-            self.add_module('conv2', nn.Conv2d(32, 64, kernel_size=3, padding=1))
-            self.add_module('relu2', nn.ReLU())
-            self.add_module('pool2', nn.MaxPool2d(kernel_size=2))
-            self.add_module('drop2', nn.Dropout(dropout_rate))
-            self.add_module('conv3', nn.Conv2d(64, 128, kernel_size=3, padding=1))
-            self.add_module('relu3', nn.ReLU())
-            self.add_module('pool3', nn.MaxPool2d(kernel_size=2))
-            self.add_module('drop3', nn.Dropout(dropout_rate))
+# ---------------------------------------------------------------------------
+# Feature layers
+# ---------------------------------------------------------------------------
  
-    def get_out_feature_size(self):
-        if self.shallow:
-            return 64 * 4 * 4
-        else:
-            return 128 * 3 * 3
+class MNISTFeatureLayer(nn.Module):
+    """
+    Configurable CNN feature extractor for 1-channel 28×28 images (MNIST).
+ 
+    Architecture
+    ------------
+    n_conv_blocks stacked blocks, each containing:
+        Conv2d(in → out, kernel_size, padding) → BatchNorm2d → ReLU
+        → MaxPool2d(2) → Dropout2d(dropout_rate)
+ 
+    Channel progression: base_channels, base_channels×2, base_channels×4, …
+    The output spatial size shrinks by ×2 per block (MaxPool).
+ 
+    Parameters
+    ----------
+    dropout_rate   : dropout probability applied after each pooling step.
+    n_conv_blocks  : number of conv blocks (1–4 recommended for 28×28 input).
+    base_channels  : channels in the first block; doubles each subsequent block.
+    kernel_size    : conv kernel size; must be odd (padding = kernel_size // 2
+                     is set automatically to preserve spatial dims before pooling).
+ 
+    Notes
+    -----
+    - Output feature size is determined by a dummy forward pass in __init__
+      so get_out_feature_size() is always correct regardless of architecture.
+    - The original shallow / deep distinction is replaced by n_conv_blocks=1
+      (shallow) or n_conv_blocks≥2 (deep).
+    """
+ 
+    def __init__(
+        self,
+        dropout_rate: float = 0.0,
+        n_conv_blocks: int = 3,
+        base_channels: int = 32,
+        kernel_size: int = 3,
+        batch_norm: bool = True,
+    ):
+        super().__init__()
+        if n_conv_blocks < 1:
+            raise ValueError("n_conv_blocks must be ≥ 1")
+        if kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be odd")
+ 
+        padding = kernel_size // 2
+        blocks  = []
+        in_ch   = 1
+ 
+        for i in range(n_conv_blocks):
+            out_ch = base_channels * (2 ** i)
+            blocks += [
+                nn.Conv2d(in_ch, out_ch, kernel_size=kernel_size, padding=padding),
+                nn.BatchNorm2d(out_ch) if batch_norm else nn.Identity(),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=2),
+                nn.Dropout2d(dropout_rate),
+            ]
+            in_ch = out_ch
+ 
+        self.features = nn.Sequential(*blocks)
+ 
+        # Determine output size once via a dummy forward pass.
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, 28, 28)
+            self._out_size = int(self.features(dummy).view(1, -1).shape[1])
+ 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.features(x)
+ 
+    def get_out_feature_size(self) -> int:
+        return self._out_size
  
  
-class UCIAdultFeatureLayer(nn.Sequential):
-    def __init__(self, dropout_rate=0., shallow=True):
-        super(UCIAdultFeatureLayer, self).__init__()
-        self.shallow = shallow
-        if shallow:
-            self.add_module('linear', nn.Linear(113, 1024))
-        else:
-            raise NotImplementedError
+class _UCIFeatureLayer(nn.Module):
+    """
+    Shared configurable MLP feature extractor for tabular UCI datasets.
  
-    def get_out_feature_size(self):
-        return 1024
+    Architecture
+    ------------
+    n_layers fully-connected blocks, each containing:
+        Linear(in → hidden_size) → BatchNorm1d → ReLU → Dropout
+ 
+    Parameters
+    ----------
+    input_size   : dimensionality of the raw input features.
+    dropout_rate : dropout probability applied in every block.
+    n_layers     : number of Linear blocks (≥ 1).
+    hidden_size  : width of every hidden layer (constant across all blocks).
+    """
+ 
+    def __init__(
+        self,
+        input_size: int,
+        dropout_rate: float = 0.,
+        n_layers: int = 1,
+        hidden_size: int = 1024,
+        batch_norm: bool = True,
+    ):
+        super().__init__()
+        if n_layers < 1:
+            raise ValueError("n_layers must be ≥ 1")
+ 
+        blocks = []
+        in_size = input_size
+        for _ in range(n_layers):
+            blocks += [
+                nn.Linear(in_size, hidden_size),
+                nn.BatchNorm1d(hidden_size) if batch_norm else nn.Identity(),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout_rate),
+            ]
+            in_size = hidden_size
+ 
+        self.features   = nn.Sequential(*blocks)
+        self._out_size  = hidden_size
+ 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.features(x)
+ 
+    def get_out_feature_size(self) -> int:
+        return self._out_size
  
  
-class UCILetterFeatureLayer(nn.Sequential):
-    def __init__(self, dropout_rate=0., shallow=True):
-        super(UCILetterFeatureLayer, self).__init__()
-        self.shallow = shallow
-        if shallow:
-            self.add_module('linear', nn.Linear(16, 1024))
-        else:
-            raise NotImplementedError
- 
-    def get_out_feature_size(self):
-        return 1024
+class UCIAdultFeatureLayer(_UCIFeatureLayer):
+    """MLP feature extractor for UCI Adult (113 input features)."""
+    def __init__(self, dropout_rate: float = 0., n_layers: int = 1, hidden_size: int = 1024, 
+                 batch_norm: bool = True):
+        super().__init__(input_size=113, dropout_rate=dropout_rate,
+                         n_layers=n_layers, hidden_size=hidden_size, batch_norm=batch_norm)
  
  
-class UCIYeastFeatureLayer(nn.Sequential):
-    def __init__(self, dropout_rate=0., shallow=True):
-        super(UCIYeastFeatureLayer, self).__init__()
-        self.shallow = shallow
-        if shallow:
-            self.add_module('linear', nn.Linear(8, 1024))
-        else:
-            raise NotImplementedError
+class UCILetterFeatureLayer(_UCIFeatureLayer):
+    """MLP feature extractor for UCI Letter (16 input features)."""
+    def __init__(self, dropout_rate: float = 0., n_layers: int = 1, hidden_size: int = 1024, 
+                 batch_norm: bool = True):
+        super().__init__(input_size=16, dropout_rate=dropout_rate,
+                         n_layers=n_layers, hidden_size=hidden_size, batch_norm=batch_norm)
  
-    def get_out_feature_size(self):
-        return 1024
+ 
+class UCIYeastFeatureLayer(_UCIFeatureLayer):
+    """MLP feature extractor for UCI Yeast (8 input features)."""
+    def __init__(self, dropout_rate: float = 0., n_layers: int = 1, hidden_size: int = 1024, 
+                 batch_norm: bool = True):
+        super().__init__(input_size=8, dropout_rate=dropout_rate,
+                         n_layers=n_layers, hidden_size=hidden_size, batch_norm=batch_norm)
  
  
 class Tree(nn.Module):
