@@ -1,5 +1,5 @@
 # Neural-Decision-Forests
-An implementation of the Deep Neural Decision Forests(dNDF) in PyTorch.
+An updated implementation of the Deep Neural Decision Forests(dNDF) in PyTorch.
 ![](http://cnyah.com/2018/01/29/dNDF/arch.png)
 
 # Features
@@ -7,9 +7,10 @@ An implementation of the Deep Neural Decision Forests(dNDF) in PyTorch.
 - Jointly training $\pi$ and $\Theta$ proposed by chrischoy in his work [Fully Differentiable Deep Neural Decision Forest](https://github.com/chrischoy/fully-differentiable-deep-ndf-tf)
 - Shallow Neural Decision Forest (sNDF)
 - Deep Neural Decision Forest (dNDF)
+- Three different variants of leaf predictors (static distributions $\pi$, latent prototypes, linear experts)
 
 # Datasets
-MNIST, UCI_Adult, UCI_Letter and UCI_Yeast datasets are available. For datasets other than MNIST, you need to go to corresponding directory and run the `get_data.sh` script.
+MNIST, UCI_Adult, UCI_Letter and UCI_Yeast datasets are available (for now...). For datasets other than MNIST, you need to go to corresponding directory and run the `get_data.sh` script.
 
 # Requirements
 - Python 3.x
@@ -28,9 +29,9 @@ MNIST, UCI_Adult, UCI_Letter and UCI_Yeast datasets are available. For datasets 
 
  Plain training:
  ```
- python train.py -dataset mnist -n_class 10 -gpuid 0 -n_tree 80 -tree_depth 10 -batch_size 1000 -epochs 100
+ python train.py -dataset mnist -n_class 10 -gpuid 0 -n_tree 80 -tree_depth 10 -batch_size 1000 -epochs 100 -variant leaf_dist
  ```
  Architecture and hyper-parameters tuning:
  ```
- python tune.py -dataset mnist -n_trials 50 -epochs 30 -es_monitor val_loss -gpuid 0
+ python tune_train.py -dataset mnist -n_trials 50 -epochs 30 -es_monitor val_loss -gpuid 0 -variant leaf_dist
  ```
