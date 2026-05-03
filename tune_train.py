@@ -198,7 +198,7 @@ def prepare_db(opt) -> dict:
 
 def sample_hyperparameters(trial: optuna.Trial, dataset_name: str, variant: str) -> dict:
     """
-    All tuneable knobs in one place.
+    All tuneable parameters in one place.
 
     Variant-conditional parameters
     --------------------------------
@@ -213,7 +213,7 @@ def sample_hyperparameters(trial: optuna.Trial, dataset_name: str, variant: str)
 
     Memory warning
     --------------
-    n_leaf = 2^tree_depth.  Keep tree_depth ≤ 10 to avoid OOM on 32 GB machines.
+    n_leaf = 2^tree_depth.
     """
     hp = {
         # --- Forest ---
